@@ -57,6 +57,7 @@ from app.routers import analysis_preferences as analysis_preferences_router
 from app.routers import advanced_courses as advanced_courses_router  # 社区版保留（课程内容物理裁剪到前 5 节，见方案 §7.4）
 from app.routers import embedded_nanobot as embedded_nanobot_router
 from app.routers import paper as paper_router
+from app.routers import futures as futures_router
 from app.routers import portfolio as portfolio_router
 from app.routers import review as review_router
 from app.routers import intelligent_assistant as intelligent_assistant_router
@@ -120,6 +121,8 @@ COMMUNITY_ROUTERS = [
     (sync_router.router, "sync", {}),
     (multi_source_sync.router, "multi_source_sync", {}),
     (paper_router.router, "paper", {"prefix": "/api", "tags": ["paper"]}),
+    # 期货账本 M1：只读查询 + 同步/下单占位。与股票持仓路由分离。
+    (futures_router.router, "futures", {"prefix": "/api", "tags": ["futures"]}),
     (portfolio_router.router, "portfolio", {"prefix": "/api", "tags": ["portfolio"]}),
     (review_router.router, "review", {"prefix": "/api", "tags": ["review"]}),
     (intelligent_assistant_router.router, "intelligent_assistant", {"tags": ["assistant"]}),
