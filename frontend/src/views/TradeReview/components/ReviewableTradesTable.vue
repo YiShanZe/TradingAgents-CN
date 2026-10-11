@@ -27,21 +27,29 @@
           <el-tag size="small" :type="getMarketType(row.market)">{{ row.market || 'CN' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="buy_count" label="买入" width="70" align="center" />
-      <el-table-column prop="sell_count" label="卖出" width="70" align="center" />
+      <el-table-column label="买入" width="80" align="center">
+        <template #default="{ row }">
+          {{ row.market === 'FUT' ? `开${row.open_count ?? row.buy_count ?? 0}` : row.buy_count }}
+        </template>
+      </el-table-column>
+      <el-table-column label="卖出" width="80" align="center">
+        <template #default="{ row }">
+          {{ row.market === 'FUT' ? `平${row.close_count ?? row.sell_count ?? 0}` : row.sell_count }}
+        </template>
+      </el-table-column>
       <el-table-column prop="total_pnl" label="累计盈亏" width="120" align="right">
         <template #default="{ row }">
-          <span :class="(row.total_pnl || 0) >= 0 ? 'positive' : 'negative'">
+          <span :class="pnlTone(row.total_pnl)">
             {{ formatPnl(row.total_pnl) }}
           </span>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="100" align="center">
         <template #default="{ row }">
-          <el-tag v-if="row.status === 'completed' || row.sell_count >= row.buy_count" type="success" size="small">
+          <el-tag v-if="row.status === 'completed' || (row.market !== 'FUT' && row.sell_count >= row.buy_count)" type="success" size="small">
             已平仓
           </el-tag>
-          <el-tag v-else-if="row.sell_count > 0" type="warning" size="small">
+          <el-tag v-else-if="(row.market === 'FUT' ? (row.close_count || 0) : row.sell_count) > 0" type="warning" size="small">
             部分持仓
           </el-tag>
           <el-tag v-else type="primary" size="small">
@@ -130,13 +138,20 @@ const handleViewHistory = (stock: ReviewableStock) => {
 
 const formatPnl = (value?: number) => {
   if (value === undefined || value === null) return '-'
-  const prefix = value >= 0 ? '+' : ''
+  const prefix = value > 0 ? '+' : ''
   return prefix + value.toFixed(2)
+}
+
+const pnlTone = (val?: number | null) => {
+  const n = Number(val)
+  if (!Number.isFinite(n) || n === 0) return 'flat'
+  return n > 0 ? 'positive' : 'negative'
 }
 
 const getMarketType = (market?: string): TagType => {
   const map: Record<string, TagType> = {
-    CN: 'danger'
+    CN: 'danger',
+    FUT: 'warning'
   }
   return map[market || 'CN'] || 'info'
 }
@@ -157,8 +172,9 @@ const goToPaperTrading = () => {
     }
   }
 
-  .positive { color: #f56c6c; }  // 中国习惯：红色表示盈利（正数）
-  .negative { color: #67c23a; }  // 中国习惯：绿色表示亏损（负数）
+  .positive { color: #f56c6c; }
+  .negative { color: #67c23a; }
+  .flat { color: #909399; }
   
   .tips {
     margin-top: 20px;

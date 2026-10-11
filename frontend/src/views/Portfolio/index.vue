@@ -8,7 +8,7 @@
       </div>
       <div class="actions">
         <el-button :icon="Refresh" text size="small" @click="refreshData">刷新</el-button>
-        <el-button v-if="activeTab === 'real' && !isJdyunMode()" type="success" plain :loading="qmtSyncing" @click="syncPositionsFromQmt">QMT同步</el-button>
+        <el-button v-if="activeTab === 'real' && !isJdyunMode()" type="success" plain :loading="qmtSyncing" @click="syncPositionsFromQmt">QMT 持仓导入</el-button>
         <el-button v-if="activeTab === 'real'" type="primary" :icon="Plus" @click="showAddDialog = true">添加持仓</el-button>
         <el-button v-if="activeTab === 'real'" type="info" :icon="List" @click="showChangesDialog = true">变动记录</el-button>
         <el-button v-if="activeTab === 'real'" type="warning" :icon="Clock" @click="showHistoryDialog = true">历史持仓</el-button>
@@ -323,13 +323,14 @@
                     <el-radio-button value="all">全部</el-radio-button>
                     <el-radio-button value="CN">A股</el-radio-button>
                     <el-radio-button value="ETF">ETF</el-radio-button>
+                    <el-radio-button value="FUT">期货</el-radio-button>
                   </el-radio-group>
                 </div>
               </template>
 
               <!-- 按市场分组展示 -->
               <div v-if="paperSelectedMarket === 'all'" class="market-groups">
-                <template v-for="market in ['CN']" :key="market">
+                <template v-for="market in ['CN', 'FUT']" :key="'paper-' + market">
                   <div v-if="getPositionsByMarket(paperPositions, market).length > 0" class="market-group">
                     <div class="market-group-header">
                       <el-tag :type="getMarketTagType(market)" size="small">{{ getMarketName(market) }}</el-tag>
@@ -355,7 +356,16 @@
                           </div>
                         </template>
                       </el-table-column>
-                      <el-table-column prop="quantity" label="数量" width="80" align="right" />
+                      <el-table-column label="数量" width="110" align="right">
+                        <template #default="{ row }">
+                          <template v-if="row.market === 'FUT'">
+                            <span v-if="row.position_side !== 'short' && row.quantity">多{{ row.quantity }}手</span>
+                            <span v-if="row.position_side === 'short'">空{{ row.quantity }}手</span>
+                            <span v-else-if="row.short_qty">空{{ row.short_qty }}手</span>
+                          </template>
+                          <template v-else>{{ row.quantity }}</template>
+                        </template>
+                      </el-table-column>
                       <el-table-column label="成本价" width="100" align="right">
                         <template #default="{ row }">{{ row.cost_price?.toFixed(2) }}</template>
                       </el-table-column>
@@ -408,7 +418,16 @@
                       <el-tag :type="getDisplayMarketTagType(row.market, row.code)" size="small">{{ getDisplayMarketName(row.market, row.code) }}</el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column prop="quantity" label="数量" width="80" align="right" />
+                  <el-table-column label="数量" width="110" align="right">
+                    <template #default="{ row }">
+                      <template v-if="row.market === 'FUT'">
+                        <span v-if="row.position_side !== 'short' && row.quantity">多{{ row.quantity }}手</span>
+                        <span v-if="row.position_side === 'short'">空{{ row.quantity }}手</span>
+                        <span v-else-if="row.short_qty">空{{ row.short_qty }}手</span>
+                      </template>
+                      <template v-else>{{ row.quantity }}</template>
+                    </template>
+                  </el-table-column>
                   <el-table-column label="成本价" width="100" align="right">
                     <template #default="{ row }">{{ row.cost_price?.toFixed(2) }}</template>
                   </el-table-column>
@@ -552,7 +571,7 @@ const stats = ref<PortfolioStats | null>(null)
 const accountCardRef = ref<InstanceType<typeof AccountCard> | null>(null)
 const activeTab = ref<'real' | 'paper'>('real')
 const selectedMarket = ref<'all' | 'CN' | 'ETF'>('all')
-const paperSelectedMarket = ref<'all' | 'CN' | 'ETF'>('all')
+const paperSelectedMarket = ref<'all' | 'CN' | 'ETF' | 'FUT'>('all')
 const showAddDialog = ref(false)
 const showAnalysisDialog = ref(false)
 const showPositionAnalysisDialog = ref(false)
@@ -640,8 +659,8 @@ const formatSyncMoney = (val?: number | null, symbol = '¥') => {
 }
 
 const pnlClass = (val?: number) => {
-  if (val === undefined || val === null) return ''
-  return val >= 0 ? 'profit' : 'loss'
+  if (val === undefined || val === null || Number.isNaN(Number(val)) || Number(val) === 0) return 'flat'
+  return Number(val) > 0 ? 'profit' : 'loss'
 }
 
 const isEtfCode = (code?: string) => getMarketByStockCode(code || '') === 'ETF'
@@ -679,22 +698,25 @@ const matchesSelectedMarket = (position: PositionItem, selected: string) => {
 // 市场相关方法
 const getMarketName = (market: string) => {
   const map: Record<string, string> = {
-    CN: 'A股'
+    CN: 'A股',
+    FUT: '期货'
   }
   return map[market] || market
 }
 
 const getMarketTagType = (market: string) => {
   const map: Record<string, any> = {
-    CN: 'danger'
+    CN: 'danger',
+    FUT: 'warning'
   }
   return map[market] || 'info'
 }
 
-// 币种符号
+// 币种符号。国内期货与 A 股同为人民币。
 const getCurrencySymbol = (market: string) => {
   const map: Record<string, string> = {
-    CN: '¥'
+    CN: '¥',
+    FUT: '¥'
   }
   return map[market] || '¥'
 }
@@ -773,8 +795,23 @@ const getMarketValue = (positions: PositionItem[], market: string) => {
 // 计算统计数据
 const calculateStats = (positions: PositionItem[]): StatsData => {
   const total_value = positions.reduce((sum, p) => sum + getPositionValue(p), 0)
-  const total_cost = positions.reduce((sum, p) => sum + (p.cost_price || 0) * (p.quantity || 0), 0)
-  const unrealized_pnl = total_value - total_cost
+  const total_cost = positions.reduce((sum, p) => {
+    if (p.market === 'FUT') {
+      const pnl = Number(p.unrealized_pnl)
+      const pct = Number(p.unrealized_pnl_pct)
+      if (Number.isFinite(pnl) && Number.isFinite(pct) && pct !== 0) {
+        return sum + pnl / (pct / 100)
+      }
+      return sum
+    }
+    return sum + (p.cost_price || 0) * (p.quantity || 0)
+  }, 0)
+  const unrealized_pnl = positions.reduce((sum, p) => {
+    if (p.market === 'FUT' && p.unrealized_pnl != null && !Number.isNaN(Number(p.unrealized_pnl))) {
+      return sum + Number(p.unrealized_pnl)
+    }
+    return sum + (getPositionValue(p) - (p.cost_price || 0) * (p.quantity || 0))
+  }, 0)
   const unrealized_pnl_pct = total_cost > 0 ? (unrealized_pnl / total_cost) * 100 : 0
   return {
     total_value,
@@ -918,8 +955,8 @@ const buildQmtPreviewMessage = (preview: QMTPositionSyncPreview) => {
 const syncPositionsFromQmt = async () => {
   try {
     const { value } = await ElMessageBox.prompt(
-      '请输入 QMT 资金账号。系统会先展示覆盖预览，确认后再执行同步。',
-      'QMT 持仓同步',
+      '请输入 QMT 资金账号。此操作只导入 A 股持仓和 CNY 现金，不会接入下单通道。确认前会先展示覆盖预览。',
+      'QMT 持仓导入',
       {
         confirmButtonText: '查看预览',
         cancelButtonText: '取消',
@@ -943,16 +980,16 @@ const syncPositionsFromQmt = async () => {
     })
     const preview = previewRes.data
     if (!preview) {
-      ElMessage.error('未获取到 QMT 同步预览')
+      ElMessage.error('未获取到 QMT 持仓导入预览')
       return
     }
 
     await ElMessageBox.confirm(
       buildQmtPreviewMessage(preview),
-      '确认覆盖同步',
+      '确认导入持仓',
       {
         type: 'warning',
-        confirmButtonText: '开始同步',
+        confirmButtonText: '确认导入',
         cancelButtonText: '取消',
         dangerouslyUseHTMLString: true
       }
@@ -970,12 +1007,12 @@ const syncPositionsFromQmt = async () => {
       ? `，CNY 现金同步为 ${formatSyncMoney(syncResult.synced_cash)}`
       : ''
     ElMessage.success(
-      `QMT 同步完成：覆盖 ${syncResult?.deleted_positions ?? 0} 个旧持仓，导入 ${syncResult?.imported_count ?? 0} 条${cashHint}`
+      `QMT 持仓导入完成：覆盖 ${syncResult?.deleted_positions ?? 0} 个旧持仓，导入 ${syncResult?.imported_count ?? 0} 条${cashHint}`
     )
     refreshData()
   } catch (e: any) {
     if (e !== 'cancel' && e !== 'close') {
-      ElMessage.error(e?.message || 'QMT 同步失败')
+      ElMessage.error(e?.message || 'QMT 持仓导入失败')
     }
   } finally {
     qmtSyncing.value = false
@@ -1223,6 +1260,10 @@ onMounted(() => {
 
 .loss {
   color: #67C23A; /* 绿色表示亏损（中国股市规范） */
+}
+
+.flat {
+  color: #909399;
 }
 
 .main-content {

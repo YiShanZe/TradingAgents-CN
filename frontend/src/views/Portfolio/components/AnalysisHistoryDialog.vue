@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    title="📊 持仓研究历史"
+    title="📊 持仓分析历史"
     width="1000px"
     :close-on-click-modal="false"
     @close="handleClose"
@@ -239,11 +239,11 @@ const getStatusText = (status: string) => {
 
 <style scoped>
 .text-success {
-  color: #67c23a;
+  color: #f56c6c;
 }
 
 .text-danger {
-  color: #f56c6c;
+  color: #67c23a;
 }
 </style>
 

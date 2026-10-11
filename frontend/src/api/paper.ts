@@ -16,6 +16,13 @@ export interface PaperPositionItem {
   code: string
   quantity: number
   avg_cost: number
+  short_qty?: number
+  short_avg?: number
+  position_side?: 'long' | 'short' | 'both'
+  multiplier?: number
+  margin_used?: number
+  market?: string
+  currency?: string
   last_price?: number | null
   market_value?: number
   unrealized_pnl?: number | null
@@ -24,7 +31,7 @@ export interface PaperPositionItem {
 export interface PaperOrderItem {
   user_id?: string
   code: string
-  side: 'buy' | 'sell'
+  side: 'buy' | 'sell' | 'short' | 'cover'
   quantity: number
   price: number
   amount: number
@@ -40,7 +47,7 @@ export interface GetAccountResponse {
 
 export interface PlaceOrderPayload {
   code: string
-  side: 'buy' | 'sell'
+  side: 'buy' | 'sell' | 'short' | 'cover'
   quantity: number
   market?: string
   price?: number  // 可选：指定价格
@@ -100,5 +107,15 @@ export const paperApi = {
   },
   async getQuote(code: string, market?: string) {
     return ApiClient.get<QuoteInfo>(`/api/paper/quote/${code}`, { market })
+  },
+  /** 天勤只读账户。使用已导入的 ApiClient，不能调用未定义的 request。 */
+  async getTqAccount() {
+    return ApiClient.get<Record<string, any>>('/api/paper/tq-account')
+  },
+  async getTqPositions() {
+    return ApiClient.get<{ count: number; items: any[] }>('/api/paper/tq-positions')
+  },
+  async getTqOrderStatus() {
+    return ApiClient.get<Record<string, any>>('/api/paper/tq-order-status')
   }
 }

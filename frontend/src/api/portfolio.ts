@@ -17,6 +17,9 @@ export interface PositionItem {
   currency: string
   quantity: number
   cost_price: number
+  short_qty?: number
+  short_avg?: number
+  position_side?: 'long' | 'short' | 'both' | string
   /** 原始买入均价（减仓不变，用于投资评估）；无则与 cost_price 相同 */
   original_avg_cost?: number | null
   /** 原始成本价（不复权的实际成交价） */

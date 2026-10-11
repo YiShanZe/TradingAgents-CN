@@ -9,6 +9,21 @@ from app.routers.auth_db import get_current_user
 from app.core.database import get_mongo_db
 from app.core.response import ok
 from app.services.database.serialization import serialize_document
+from app.services.paper_futures import (
+    CLOSE_LONG,
+    CLOSE_SHORT,
+    DEFAULT_MARGIN_RATE,
+    FUTURES_SIDES,
+    OPEN_LONG,
+    OPEN_SHORT,
+    enrich_position_row,
+    futures_multiplier,
+    is_futures_code,
+    margin_required,
+    notional,
+    tq_account_unavailable,
+    tq_order_gate,
+)
 
 router = APIRouter(prefix="/paper", tags=["paper"])
 logger = logging.getLogger("webapi")
@@ -25,10 +40,10 @@ INITIAL_CASH_BY_MARKET = {
 
 
 class PlaceOrderRequest(BaseModel):
-    code: str = Field(..., description="股票代码（支持A股/ETF/港股/美股）")
-    side: Literal["buy", "sell"]
+    code: str = Field(..., description="代码（A股/ETF/期货，如 600519、AP601）")
+    side: Literal["buy", "sell", "short", "cover"]
     quantity: int = Field(..., gt=0)
-    market: Optional[str] = Field(None, description="市场类型 (CN/ETF/HK/US)，不传则自动识别")
+    market: Optional[str] = Field(None, description="市场类型 (CN/ETF/HK/US/FUT)，不传则自动识别")
     # 可选：指定价格（如果不指定，则使用当前实时价格）
     price: Optional[float] = Field(None, description="指定价格（必须在当天最高最低价之间）")
     # 可选：关联的分析ID，便于从分析页面一键下单后追踪
@@ -80,12 +95,21 @@ def _resolve_market_and_code(code: str, market: Optional[str] = None) -> Tuple[s
         normalized_code = normalized_code.zfill(6)
         return "CN", normalized_code, True
 
+    if requested_market == "FUT":
+        return "FUT", normalized_code, False
+
     if requested_market in {"CN", "HK", "US"}:
         if requested_market == "CN":
             normalized_code = normalized_code.zfill(6)
         elif requested_market == "HK" and normalized_code.endswith('.HK'):
             normalized_code = normalized_code[:-3].zfill(5)
         return requested_market, normalized_code, requested_market == "CN" and _is_cn_etf_symbol(normalized_code)
+
+    raw_code = str(code or "").strip().upper()
+    # 带数字的合约（AP601、RB2610）在未声明市场时按期货处理；纯字母仍交给原有美股识别。
+    if is_futures_code(raw_code) and re.search(r"\d", raw_code.split(".")[-1]):
+        symbol = raw_code.split(".")[-1]
+        return "FUT", symbol, False
 
     detected_market, normalized_code = _detect_market_and_code(code)
     is_etf = detected_market == "CN" and _is_cn_etf_symbol(normalized_code)
@@ -275,6 +299,8 @@ async def _get_stock_name(code: str, market: str) -> str:
                 logger.warning(f"⚠️ {market}股名称获取失败 {code}: {e}")
                 return f"{'港股' if market == 'HK' else '美股'}{code}"
 
+        elif market == "FUT":
+            return str(code or "").strip().upper()
         else:
             return f"股票{code}"
 
@@ -476,30 +502,17 @@ async def get_account(current_user: dict = Depends(get_current_user)):
     detailed_positions: List[Dict[str, Any]] = []
     for p in positions:
         code = p.get("code")
-        name = p.get("name", "")  # 从数据库获取股票名称
         market = p.get("market", "CN")
         currency = p.get("currency", "CNY")
-        qty = int(p.get("quantity", 0))
-        avg_cost = float(p.get("avg_cost", 0.0))
-        available_qty = p.get("available_qty", qty)
-
-        # 获取最新价
         last = await _get_last_price(code, market)
-        mkt_value = round((last or 0.0) * qty, 2)
-        positions_value_by_currency[currency] += mkt_value
-
-        detailed_positions.append({
-            "code": code,
-            "name": name,  # 添加股票名称到响应
-            "market": market,
-            "currency": currency,
-            "quantity": qty,
-            "available_qty": available_qty,
-            "avg_cost": avg_cost,
-            "last_price": last,
-            "market_value": mkt_value,
-            "unrealized_pnl": None if last is None else round((last - avg_cost) * qty, 2)
-        })
+        if (last is None or last <= 0) and p.get("last_price"):
+            try:
+                last = float(p.get("last_price"))
+            except (TypeError, ValueError):
+                last = None
+        row = enrich_position_row(p, last)
+        positions_value_by_currency[currency] = positions_value_by_currency.get(currency, 0.0) + float(row["equity_value"])
+        detailed_positions.append({k: v for k, v in row.items() if k != "equity_value"})
 
     # 计算总资产（按货币分别显示）
     cash = acc.get("cash", {})
@@ -534,6 +547,170 @@ async def get_account(current_user: dict = Depends(get_current_user)):
     return ok({"account": summary, "positions": detailed_positions})
 
 
+def _cash_balance(acc: Dict[str, Any], currency: str) -> float:
+    cash = acc.get("cash", {})
+    if isinstance(cash, dict):
+        return float(cash.get(currency, 0.0))
+    return float(cash or 0.0) if currency == "CNY" else 0.0
+
+
+async def _place_futures_order(
+    payload: PlaceOrderRequest,
+    user_id: str,
+    code: str,
+    side: str,
+    qty: int,
+    analysis_id: Optional[str],
+) -> Dict[str, Any]:
+    """期货本地模拟成交。只扣保证金并记账，不连接天勤实盘。"""
+    if side not in FUTURES_SIDES:
+        raise HTTPException(status_code=400, detail="期货方向仅支持开多、开空、平多、平空")
+
+    db = get_mongo_db()
+    currency = "CNY"
+    multiplier = futures_multiplier(code)
+    specified_price = payload.price
+    if specified_price is not None and specified_price > 0:
+        price = float(specified_price)
+    else:
+        price = await _get_last_price(code, "FUT")
+        if price is None or price <= 0:
+            raise HTTPException(status_code=400, detail=f"无法获取期货 {code} 的价格，请指定价格")
+
+    trade_notional = notional(price, qty, multiplier)
+    commission = round(max(trade_notional * 0.0001, 0.0), 2)
+    acc = await _get_or_create_account(user_id)
+    pos = await db["paper_positions"].find_one({"user_id": user_id, "code": code, "market": "FUT"})
+    now_iso = datetime.utcnow().isoformat()
+    realized = 0.0
+
+    long_qty = int((pos or {}).get("quantity") or 0)
+    short_qty = int((pos or {}).get("short_qty") or 0)
+    long_avg = float((pos or {}).get("avg_cost") or 0)
+    short_avg = float((pos or {}).get("short_avg") or 0)
+    margin_long = float((pos or {}).get("margin_long") or 0)
+    margin_short = float((pos or {}).get("margin_short") or 0)
+
+    if side in {OPEN_LONG, OPEN_SHORT}:
+        required_margin = margin_required(price, qty, multiplier, DEFAULT_MARGIN_RATE)
+        total_cost = required_margin + commission
+        available_cash = _cash_balance(acc, currency)
+        if available_cash < total_cost:
+            raise HTTPException(
+                status_code=400,
+                detail=f"可用{currency}不足：开仓保证金及费用需要 {total_cost:.2f}，可用 {available_cash:.2f}",
+            )
+        await db["paper_accounts"].update_one(
+            {"user_id": user_id},
+            {"$inc": {f"cash.{currency}": -total_cost}, "$set": {"updated_at": now_iso}},
+        )
+        if side == OPEN_LONG:
+            new_qty = long_qty + qty
+            long_avg = round((long_avg * long_qty + price * qty) / new_qty, 4) if new_qty else price
+            long_qty = new_qty
+            margin_long = round(margin_long + required_margin, 2)
+        else:
+            new_qty = short_qty + qty
+            short_avg = round((short_avg * short_qty + price * qty) / new_qty, 4) if new_qty else price
+            short_qty = new_qty
+            margin_short = round(margin_short + required_margin, 2)
+    else:
+        held = long_qty if side == CLOSE_LONG else short_qty
+        avg = long_avg if side == CLOSE_LONG else short_avg
+        side_margin = margin_long if side == CLOSE_LONG else margin_short
+        if held < qty:
+            label = "多头" if side == CLOSE_LONG else "空头"
+            raise HTTPException(status_code=400, detail=f"{label}可平手数不足：需要 {qty} 手，可平 {held} 手")
+        release = round(side_margin * (qty / held), 2) if held else 0.0
+        if side == CLOSE_LONG:
+            realized = round((price - avg) * qty * multiplier, 2)
+            long_qty = held - qty
+            margin_long = round(side_margin - release, 2)
+            if long_qty == 0:
+                long_avg = 0.0
+                margin_long = 0.0
+        else:
+            realized = round((avg - price) * qty * multiplier, 2)
+            short_qty = held - qty
+            margin_short = round(side_margin - release, 2)
+            if short_qty == 0:
+                short_avg = 0.0
+                margin_short = 0.0
+        cash_delta = round(release + realized - commission, 2)
+        await db["paper_accounts"].update_one(
+            {"user_id": user_id},
+            {
+                "$inc": {f"cash.{currency}": cash_delta, f"realized_pnl.{currency}": realized},
+                "$set": {"updated_at": now_iso},
+            },
+        )
+
+    margin_used = round(margin_long + margin_short, 2)
+    fields = {
+        "quantity": long_qty,
+        "available_qty": long_qty,
+        "avg_cost": long_avg,
+        "short_qty": short_qty,
+        "short_avg": short_avg,
+        "margin_long": margin_long,
+        "margin_short": margin_short,
+        "margin_used": margin_used,
+        "multiplier": multiplier,
+        "last_price": price,
+        "market": "FUT",
+        "currency": currency,
+        "updated_at": now_iso,
+    }
+    if long_qty == 0 and short_qty == 0:
+        if pos:
+            await db["paper_positions"].delete_one({"_id": pos["_id"]})
+    elif not pos:
+        name = await _get_stock_name(code, "FUT")
+        await db["paper_positions"].insert_one({
+            "user_id": user_id,
+            "code": code,
+            "name": name or code,
+            **fields,
+        })
+    else:
+        await db["paper_positions"].update_one({"_id": pos["_id"]}, {"$set": fields})
+
+    order_doc = {
+        "user_id": user_id,
+        "code": code,
+        "market": "FUT",
+        "currency": currency,
+        "side": side,
+        "quantity": qty,
+        "price": price,
+        "amount": trade_notional,
+        "commission": commission,
+        "status": "filled",
+        "created_at": now_iso,
+        "filled_at": now_iso,
+    }
+    if analysis_id:
+        order_doc["analysis_id"] = analysis_id
+    await db["paper_orders"].insert_one(order_doc)
+    trade_doc = {
+        "user_id": user_id,
+        "code": code,
+        "market": "FUT",
+        "currency": currency,
+        "side": side,
+        "quantity": qty,
+        "price": price,
+        "amount": trade_notional,
+        "commission": commission,
+        "pnl": realized if side in {CLOSE_LONG, CLOSE_SHORT} else 0.0,
+        "timestamp": now_iso,
+    }
+    if analysis_id:
+        trade_doc["analysis_id"] = analysis_id
+    await db["paper_trades"].insert_one(trade_doc)
+    return {"order": {k: v for k, v in order_doc.items() if k != "_id"}}
+
+
 @router.post("/order", response_model=dict)
 async def place_order(payload: PlaceOrderRequest, current_user: dict = Depends(get_current_user)):
     """提交市价单，按最新价即时成交（支持多市场）"""
@@ -543,6 +720,19 @@ async def place_order(payload: PlaceOrderRequest, current_user: dict = Depends(g
     market, normalized_code, is_etf = _resolve_market_and_code(payload.code, payload.market)
 
     side = payload.side
+    if market == "FUT":
+        result = await _place_futures_order(
+            payload,
+            current_user["id"],
+            normalized_code,
+            side,
+            int(payload.quantity),
+            payload.analysis_id if hasattr(payload, "analysis_id") else None,
+        )
+        return ok(result)
+
+    if side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="股票模拟仅支持买入和卖出")
     qty = int(payload.quantity)
     analysis_id = payload.analysis_id if hasattr(payload, "analysis_id") else None
     # 🔥 修复：直接从 Pydantic 模型获取 price 字段（Pydantic 模型可以直接访问字段）
@@ -758,28 +948,43 @@ async def list_positions(current_user: dict = Depends(get_current_user)):
     enriched: List[Dict[str, Any]] = []
     for p in items:
         code = p.get("code")
-        name = p.get("name", "")  # 从数据库获取股票名称
         market = p.get("market", "CN")
-        currency = p.get("currency", "CNY")
-        qty = int(p.get("quantity", 0))
-        available_qty = p.get("available_qty", qty)
-        avg_cost = float(p.get("avg_cost", 0.0))
-
         last = await _get_last_price(code, market)
-        mkt = round((last or 0.0) * qty, 2)
-        enriched.append({
-            "code": code,
-            "name": name,  # 添加股票名称到响应
-            "market": market,
-            "currency": currency,
-            "quantity": qty,
-            "available_qty": available_qty,
-            "avg_cost": avg_cost,
-            "last_price": last,
-            "market_value": mkt,
-            "unrealized_pnl": None if last is None else round((last - avg_cost) * qty, 2)
-        })
+        if (last is None or last <= 0) and p.get("last_price"):
+            try:
+                last = float(p.get("last_price"))
+            except (TypeError, ValueError):
+                last = None
+        row = enrich_position_row(p, last)
+        enriched.append({k: v for k, v in row.items() if k != "equity_value"})
     return ok({"items": enriched})
+
+
+@router.get("/tq-order-status", response_model=dict)
+async def get_tq_order_status(current_user: dict = Depends(get_current_user)):
+    """天勤下单闸门。本版本不开启真实下单。"""
+    del current_user
+    return ok(tq_order_gate())
+
+
+@router.get("/tq-account", response_model=dict)
+async def get_tq_account(current_user: dict = Depends(get_current_user)):
+    """只读账户快照。不连接实盘、不自动下单；未配置只读凭据时返回明确错误。"""
+    del current_user
+    gate = tq_order_gate()
+    if not gate["creds_loaded"]:
+        return ok(tq_account_unavailable("未配置天勤只读凭据，本地模拟记账仍可用"))
+    return ok(tq_account_unavailable("天勤只读连接未启用，本地模拟记账仍可用（不会自动下单）"))
+
+
+@router.get("/tq-positions", response_model=dict)
+async def get_tq_positions(current_user: dict = Depends(get_current_user)):
+    """只读持仓。不向天勤发送委托。"""
+    del current_user
+    gate = tq_order_gate()
+    if not gate["creds_loaded"]:
+        return ok({"count": 0, "items": [], "success": False, "error": "未配置天勤只读凭据"})
+    return ok({"count": 0, "items": [], "success": False, "error": "天勤只读连接未启用"})
 
 
 @router.get("/orders", response_model=dict)

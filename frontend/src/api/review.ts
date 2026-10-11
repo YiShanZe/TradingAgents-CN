@@ -12,7 +12,7 @@ export type ReviewType = 'single_trade' | 'complete_trade' | 'periodic'
 export type ReviewStatus = 'pending' | 'processing' | 'completed' | 'failed'
 
 /** 交易方向 */
-export type TradeSide = 'buy' | 'sell'
+export type TradeSide = 'buy' | 'sell' | 'short' | 'cover'
 
 /** 交易记录 */
 export interface TradeRecord {
@@ -163,6 +163,10 @@ export interface ReviewableStock {
   status?: 'completed' | 'holding'  // completed=已完成交易, holding=持仓中
   buy_count: number
   sell_count: number
+  short_count?: number
+  cover_count?: number
+  open_count?: number
+  close_count?: number
   total_pnl: number
   total_buy_amount?: number
   total_sell_amount?: number
@@ -344,8 +348,8 @@ export const reviewApi = {
   },
 
   /** 获取可复盘的交易列表，支持筛选 */
-  async getReviewableTrades(filter: ReviewableTradesFilter = {}) {
-    const { code, startDate, endDate, page = 1, pageSize = 20 } = filter
+  async getReviewableTrades(filter: ReviewableTradesFilter & { source?: 'paper' | 'real' } = {}) {
+    const { code, startDate, endDate, page = 1, pageSize = 20, source = 'paper' } = filter
     return ApiClient.get<{
       items: TradeRecord[]
       total: number
@@ -358,7 +362,8 @@ export const reviewApi = {
       start_date: startDate,
       end_date: endDate,
       page,
-      page_size: pageSize
+      page_size: pageSize,
+      source
     })
   },
 
@@ -371,6 +376,8 @@ export const reviewApi = {
         total_trades: number
         total_buy_quantity: number
         total_sell_quantity: number
+        total_open_quantity?: number
+        total_close_quantity?: number
         total_pnl: number
         is_closed: boolean
       }

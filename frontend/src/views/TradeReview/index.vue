@@ -99,7 +99,7 @@
       <el-col :span="4">
         <el-card shadow="never" class="stat-card">
           <div class="stat-label">总盈亏</div>
-          <div class="stat-value" :class="(statistics.total_pnl || 0) >= 0 ? 'positive' : 'negative'">
+          <div class="stat-value" :class="pnlTone(statistics.total_pnl)">
             {{ formatCurrency(statistics.total_pnl) }}
           </div>
         </el-card>
@@ -183,7 +183,7 @@
           </el-table-column>
           <el-table-column label="总盈亏" width="120" align="right">
             <template #default="{ row }">
-              <span :class="row.total_pnl >= 0 ? 'positive' : 'negative'">
+              <span :class="pnlTone(row.total_pnl)">
                 {{ formatCurrency(row.total_pnl) }}
               </span>
             </template>
@@ -251,7 +251,7 @@
         <el-col :span="4">
           <el-card shadow="never" class="stat-card">
             <div class="stat-label">已实现盈亏</div>
-            <div class="stat-value" :class="(positionStats.realized_pnl || 0) >= 0 ? 'positive' : 'negative'">
+            <div class="stat-value" :class="pnlTone(positionStats.realized_pnl)">
               {{ formatCurrency(positionStats.realized_pnl) }}
             </div>
           </el-card>
@@ -259,7 +259,7 @@
         <el-col :span="4">
           <el-card shadow="never" class="stat-card">
             <div class="stat-label">浮动盈亏</div>
-            <div class="stat-value" :class="(positionStats.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative'">
+            <div class="stat-value" :class="pnlTone(positionStats.unrealized_pnl)">
               {{ formatCurrency(positionStats.unrealized_pnl) }}
             </div>
           </el-card>
@@ -339,7 +339,7 @@
             </el-table-column>
             <el-table-column label="总盈亏" width="120" align="right">
               <template #default="{ row }">
-                <span :class="row.total_pnl >= 0 ? 'positive' : 'negative'">
+                <span :class="pnlTone(row.total_pnl)">
                   {{ formatCurrency(row.total_pnl) }}
                 </span>
               </template>
@@ -632,6 +632,12 @@ const positionCasesPage = ref(1)
 const positionCasesPageSize = ref(10)
 
 // 格式化金额
+const pnlTone = (val?: number | null) => {
+  const n = Number(val)
+  if (!Number.isFinite(n) || n === 0) return 'flat'
+  return n > 0 ? 'positive' : 'negative'
+}
+
 const formatCurrency = (value?: number) => {
   if (value === undefined || value === null) return '-'
   const prefix = value >= 0 ? '+' : ''
@@ -720,7 +726,8 @@ const loadReviewableTrades = async () => {
     const res = await reviewApi.getReviewableTrades({
       code: params.code,
       startDate: params.startDate,
-      endDate: params.endDate
+      endDate: params.endDate,
+      source: 'paper'
     })
     if (res.success) {
       // 使用 all_stocks 显示所有有交易的股票（包括只买入还没卖出的）
@@ -1307,6 +1314,9 @@ onMounted(async () => {
         &.negative {
           color: #67c23a;  // 中国习惯：绿色表示亏损（负数）
         }
+        &.flat {
+          color: #909399;
+        }
       }
     }
   }
@@ -1341,6 +1351,9 @@ onMounted(async () => {
 
     .negative {
       color: #67c23a;  // 中国习惯：绿色表示亏损（负数）
+    }
+    .flat {
+      color: #909399;
     }
   }
 }
