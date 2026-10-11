@@ -1032,10 +1032,10 @@ class PortfolioService:
                 pos = await self._enrich_position(p, "real", include_market_data)
                 positions.append(pos)
 
-        # 获取模拟交易持仓（只获取 quantity > 0 的持仓）
+        # 模拟持仓：多头 quantity>0，或期货空头 short_qty>0（空头多头数量为 0）
         if source in ["all", "paper"]:
             paper_positions = await self.db[self.paper_positions_collection].find(
-                {"user_id": user_id, "quantity": {"$gt": 0}}
+                {"user_id": user_id, "$or": [{"quantity": {"$gt": 0}}, {"short_qty": {"$gt": 0}}]}
             ).to_list(None)
             
             for p in paper_positions:
@@ -1197,11 +1197,22 @@ class PortfolioService:
         code = position.get("code", "")
         market = position.get("market", "CN")
         quantity = int(position.get("quantity", 0))
+        short_qty = int(position.get("short_qty") or 0)
+        short_avg = float(position.get("short_avg") or 0)
+        position_side = "long"
         
         # 获取成本价
         if source == "paper":
             cost_price = float(position.get("avg_cost", 0.0))
             original_avg_cost = cost_price  # 模拟盘无原始成本区分
+            if market == "FUT" and quantity <= 0 and short_qty > 0:
+                # 纯空头：对外展示手数与空头均价，避免数量 0、均价 0
+                quantity = short_qty
+                cost_price = short_avg
+                original_avg_cost = short_avg
+                position_side = "short"
+            elif market == "FUT" and short_qty > 0 and int(position.get("quantity") or 0) > 0:
+                position_side = "both"
         else:
             cost_price = float(position.get("cost_price", 0.0))
             # 向后兼容：无 original_avg_cost 时使用 cost_price
@@ -1218,8 +1229,29 @@ class PortfolioService:
         unrealized_pnl_pct = None
 
         if include_market_data:
-            current_price = await self._get_stock_price(code, market)
-            if current_price and current_price > 0:
+            if market == "FUT":
+                current_price = None
+                if position.get("last_price"):
+                    try:
+                        current_price = float(position.get("last_price"))
+                    except (TypeError, ValueError):
+                        current_price = None
+            else:
+                current_price = await self._get_stock_price(code, market)
+            if market == "FUT" and source == "paper":
+                from app.services.paper_futures import futures_multiplier, unrealized_pnl as futures_pnl
+                multiplier = int(position.get("multiplier") or futures_multiplier(code))
+                # 用原始多空数量，不用上面为展示改写过的 quantity
+                long_qty = int(position.get("quantity") or 0)
+                long_avg = float(position.get("avg_cost") or 0)
+                pnl = futures_pnl(current_price, long_qty, long_avg, short_qty, short_avg, multiplier)
+                unrealized_pnl = pnl
+                cost_value = (long_avg * long_qty + short_avg * short_qty) * multiplier
+                if current_price and current_price > 0:
+                    market_value = round(current_price * (long_qty + short_qty) * multiplier, 2)
+                if cost_value > 0 and pnl is not None:
+                    unrealized_pnl_pct = round((pnl / cost_value) * 100, 2)
+            elif current_price and current_price > 0:
                 market_value = round(current_price * quantity, 2)
                 cost_value = cost_price * quantity
                 if cost_value > 0:
@@ -1269,6 +1301,9 @@ class PortfolioService:
             currency=position.get("currency", "CNY"),
             quantity=quantity,
             cost_price=cost_price,
+            short_qty=short_qty if market == "FUT" else 0,
+            short_avg=short_avg if market == "FUT" and short_qty else None,
+            position_side=position_side if market == "FUT" else None,
             original_avg_cost=round(original_avg_cost, 4) if original_avg_cost is not None else None,
             original_cost_price=position.get("original_cost_price"),
             price_adjust_type=position.get("price_adjust_type"),

@@ -52,11 +52,50 @@
                   <el-descriptions-item label="持仓市值">¥{{ fmtAmount(account.positions_value?.CNY ?? (typeof account.positions_value === 'number' ? account.positions_value : 0)) }}</el-descriptions-item>
                   <el-descriptions-item label="总资产">¥{{ fmtAmount(account.equity?.CNY ?? (typeof account.equity === 'number' ? account.equity : 0)) }}</el-descriptions-item>
                   <el-descriptions-item label="已实现盈亏">
-                    <span :style="{ color: (account.realized_pnl?.CNY ?? (typeof account.realized_pnl === 'number' ? account.realized_pnl : 0)) >= 0 ? '#67C23A' : '#F56C6C' }">
+                    <span :style="pnlStyle(account.realized_pnl?.CNY ?? (typeof account.realized_pnl === 'number' ? account.realized_pnl : 0))">
                       ¥{{ fmtAmount(account.realized_pnl?.CNY ?? (typeof account.realized_pnl === 'number' ? account.realized_pnl : 0)) }}
                     </span>
                   </el-descriptions-item>
                 </el-descriptions>
+              </el-tab-pane>
+              <el-tab-pane label="📊 期货" name="FUT">
+                <el-divider content-position="left">
+                  天勤 TqSdk 模拟账户（只读）
+                  <el-button link type="primary" size="small" style="margin-left: 8px" :loading="loading.tq" @click="fetchTq">刷新</el-button>
+                </el-divider>
+                <el-alert
+                  v-if="tqAccount && tqAccount.success === false"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  :title="'天勤账户读取失败：' + (tqAccount.error || '未知原因')"
+                  style="margin-bottom: 8px"
+                />
+                <el-descriptions :column="2" border size="small">
+                  <el-descriptions-item label="账户权益">¥{{ fmtAmount(tqAccount?.balance) }}</el-descriptions-item>
+                  <el-descriptions-item label="可用资金">¥{{ fmtAmount(tqAccount?.available) }}</el-descriptions-item>
+                  <el-descriptions-item label="占用保证金">¥{{ fmtAmount(tqAccount?.margin) }}</el-descriptions-item>
+                  <el-descriptions-item label="冻结保证金">¥{{ fmtAmount(tqAccount?.frozen_margin) }}</el-descriptions-item>
+                  <el-descriptions-item label="浮动盈亏">
+                    <span :style="pnlStyle(tqAccount?.float_profit)">¥{{ fmtAmount(tqAccount?.float_profit) }}</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="平仓盈亏">
+                    <span :style="pnlStyle(tqAccount?.close_profit)">¥{{ fmtAmount(tqAccount?.close_profit) }}</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="风险度">{{ ((tqAccount?.risk_ratio ?? 0) * 100).toFixed(2) }}%</el-descriptions-item>
+                  <el-descriptions-item label="数据源">
+                    <el-tag size="small">{{ tqAccount?.source || 'local' }}</el-tag>
+                  </el-descriptions-item>
+                </el-descriptions>
+                <div v-if="tqOrderStatus" style="margin-top: 8px; font-size: 12px; color: #606266">
+                  <el-tag :type="tqOrderStatus.enabled ? 'success' : 'info'" size="small" effect="dark">
+                    天勤真实下单：{{ tqOrderStatus.enabled ? '已开启' : '未开启（仅本地记账）' }}
+                  </el-tag>
+                  <span style="margin-left: 8px">闸门 {{ tqOrderStatus.env_var }} = {{ tqOrderStatus.env_raw }} ｜ 凭据 {{ tqOrderStatus.creds_loaded ? '已加载' : '缺失' }}</span>
+                </div>
+                <div style="margin-top: 8px; font-size: 12px; color: #909399">
+                  期货模拟使用同一 CNY 资金，按手数和保证金记账，不会连接实盘下单。
+                </div>
               </el-tab-pane>
             </el-tabs>
 
@@ -87,37 +126,63 @@
             <el-table-column label="名称" width="100">
               <template #default="{ row }">{{ row.name || '-' }}</template>
             </el-table-column>
-            <el-table-column label="市场" width="70">
-              <template #default>
-                <el-tag type="success" size="small">🇨🇳 A股</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="数量" width="80">
+            <el-table-column label="市场" width="80">
               <template #default="{ row }">
-                {{ row.quantity }}
-                <span v-if="row.available_qty !== undefined && row.available_qty < row.quantity" style="color: #909399; font-size: 11px">
-                  (可用{{ row.available_qty }})
-                </span>
+                <el-tag v-if="isFut(row)" type="warning" size="small">📊 期货</el-tag>
+                <el-tag v-else-if="(row.market || 'CN') === 'ETF'" type="success" size="small">📈 ETF</el-tag>
+                <el-tag v-else type="success" size="small">🇨🇳 A股</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="均价" width="100">
-              <template #default="{ row }">{{ getCurrencySymbol(row.currency) }}{{ fmtPrice(row.avg_cost) }}</template>
+            <el-table-column label="数量" width="120">
+              <template #default="{ row }">
+                <template v-if="isFut(row)">
+                  <span v-if="longQty(row) > 0">多{{ longQty(row) }}手</span>
+                  <span v-if="shortQty(row) > 0" style="margin-left: 4px">空{{ shortQty(row) }}手</span>
+                </template>
+                <template v-else>
+                  {{ row.quantity }}
+                  <span v-if="row.available_qty !== undefined && row.available_qty < row.quantity" style="color: #909399; font-size: 11px">
+                    (可用{{ row.available_qty }})
+                  </span>
+                </template>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="activeMarketTab === 'FUT'" label="保证金" width="110">
+              <template #default="{ row }">
+                <span v-if="Number(row.margin_used || 0) > 0">¥{{ fmtAmount(row.margin_used) }}</span>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="均价" width="120">
+              <template #default="{ row }">
+                <template v-if="isFut(row) && longQty(row) <= 0 && shortQty(row) > 0">
+                  {{ getCurrencySymbol(row.currency) }}{{ fmtPrice(row.short_avg) }}
+                </template>
+                <template v-else-if="isFut(row) && shortQty(row) > 0">
+                  多{{ fmtPrice(row.avg_cost) }} / 空{{ fmtPrice(row.short_avg) }}
+                </template>
+                <template v-else>{{ getCurrencySymbol(row.currency) }}{{ fmtPrice(row.avg_cost) }}</template>
+              </template>
             </el-table-column>
             <el-table-column label="最新价" width="100">
               <template #default="{ row }">{{ getCurrencySymbol(row.currency) }}{{ fmtPrice(row.last_price) }}</template>
             </el-table-column>
             <el-table-column label="浮盈" width="120">
               <template #default="{ row }">
-                <span :style="{ color: (Number(row.last_price || 0) - Number(row.avg_cost || 0)) >= 0 ? '#67C23A' : '#F56C6C' }">
-                  {{ getCurrencySymbol(row.currency) }}{{ fmtAmount((Number(row.last_price || 0) - Number(row.avg_cost || 0)) * Number(row.quantity || 0)) }}
+                <span :style="pnlStyle(positionPnl(row))">
+                  {{ getCurrencySymbol(row.currency) }}{{ fmtAmount(positionPnl(row)) }}
                 </span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="200">
+            <el-table-column label="操作" width="220">
               <template #default="{ row }">
                 <el-button size="small" type="primary" link @click="viewStockDetail(row.code)">详情</el-button>
                 <el-button size="small" type="success" link @click="goAnalysisWithCode(row.code)">分析</el-button>
-                <el-button size="small" type="danger" link @click="sellPosition(row)">卖出</el-button>
+                <template v-if="isFut(row)">
+                  <el-button v-if="longQty(row) > 0" size="small" type="danger" link @click="closeFutures(row, 'long')">平多</el-button>
+                  <el-button v-if="shortQty(row) > 0" size="small" type="warning" link @click="closeFutures(row, 'short')">平空</el-button>
+                </template>
+                <el-button v-else size="small" type="danger" link @click="sellPosition(row)">卖出</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -138,8 +203,8 @@
             </el-table-column>
             <el-table-column label="方向" width="80">
               <template #default="{ row }">
-                <el-tag :type="row.side === 'buy' ? 'success' : 'danger'" size="small">
-                  {{ row.side === 'buy' ? '买入' : '卖出' }}
+                <el-tag :type="orderTagType(row)" size="small">
+                  {{ orderSideLabel(row) }}
                 </el-tag>
               </template>
             </el-table-column>
@@ -196,24 +261,37 @@
 
       <el-form label-width="90px">
         <el-form-item label="方向">
-          <el-radio-group v-model="order.side">
+          <template v-if="detectedMarket === 'FUT'">
+            <el-radio-group v-model="order.offset">
+              <el-radio-button label="open">开仓</el-radio-button>
+              <el-radio-button label="close">平仓</el-radio-button>
+            </el-radio-group>
+            <el-radio-group v-model="order.direction" style="margin-left: 8px">
+              <el-radio-button label="long">多</el-radio-button>
+              <el-radio-button label="short">空</el-radio-button>
+            </el-radio-group>
+          </template>
+          <el-radio-group v-else v-model="order.side">
             <el-radio-button label="buy">买入</el-radio-button>
             <el-radio-button label="sell">卖出</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="代码">
-          <el-input v-model="order.code" placeholder="A股: 600519" @input="detectMarket" />
+          <el-input v-model="order.code" placeholder="A股: 600519 ｜ 期货: AP / RB / IC" @input="detectMarket" />
         </el-form-item>
         <el-form-item label="市场" v-if="detectedMarket">
-          <el-tag v-if="detectedMarket === 'ETF'" type="success">📈 ETF 基金 (CNY)</el-tag>
+          <el-tag v-if="detectedMarket === 'FUT'" type="warning">📊 期货市场 (CNY·保证金·可做空)</el-tag>
+          <el-tag v-else-if="detectedMarket === 'ETF'" type="success">📈 ETF 基金 (CNY)</el-tag>
           <el-tag v-else type="success">🇨🇳 A股市场 (CNY)</el-tag>
           <div style="margin-top: 8px; font-size: 12px; color: #909399">
-            <span v-if="detectedMarket === 'ETF'">💡 场内 ETF 按 A 股规则模拟，T+1，今天买入明天可卖</span>
+            <span v-if="detectedMarket === 'FUT'">按手数模拟开平仓，不连接实盘下单</span>
+            <span v-else-if="detectedMarket === 'ETF'">💡 场内 ETF 按 A 股规则模拟，T+1，今天买入明天可卖</span>
             <span v-else>💡 A股T+1，今天买入明天可卖</span>
           </div>
         </el-form-item>
-        <el-form-item label="数量">
-          <el-input-number v-model="order.qty" :min="1" />
+        <el-form-item :label="detectedMarket === 'FUT' ? '手数' : '数量'">
+          <el-input-number v-model="order.qty" :min="1" :step="detectedMarket === 'FUT' ? 1 : 100" />
+          <span v-if="detectedMarket === 'FUT'" style="margin-left: 8px; color: #909399">手</span>
         </el-form-item>
         <el-form-item label="价格">
           <el-checkbox v-model="useCustomPrice" style="margin-right: 8px">指定价格</el-checkbox>
@@ -297,11 +375,20 @@ const router = useRouter()
 const account = ref<any | null>(null)
 const positions = ref<any[]>([])
 const orders = ref<any[]>([])
-const loading = ref({ account: false, positions: false, orders: false })
+const loading = ref({ account: false, positions: false, orders: false, tq: false })
 
 const orderDialog = ref(false)
-const order = ref({ side: 'buy', code: '', qty: 100, price: undefined as number | undefined })
+const order = ref({
+  side: 'buy' as 'buy' | 'sell',
+  offset: 'open' as 'open' | 'close',
+  direction: 'long' as 'long' | 'short',
+  code: '',
+  qty: 100,
+  price: undefined as number | undefined
+})
 const detectedMarket = ref<string>('')
+const tqAccount = ref<any | null>(null)
+const tqOrderStatus = ref<any | null>(null)
 
 // 初始化账户对话框
 const initializeDialog = ref(false)
@@ -347,6 +434,61 @@ function fmtAmount(n: number | null | undefined) {
   return Number(n).toFixed(2)
 }
 
+function pnlStyle(v: number | null | undefined) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n === 0) return { color: '#909399' }
+  return { color: n > 0 ? '#F56C6C' : '#67C23A' }
+}
+
+function isFut(row: any) {
+  return (row?.market || '') === 'FUT'
+}
+
+function longQty(row: any) {
+  return Number(row?.quantity || 0)
+}
+
+function shortQty(row: any) {
+  return Number(row?.short_qty || 0)
+}
+
+function positionPnl(row: any) {
+  if (row?.unrealized_pnl !== undefined && row?.unrealized_pnl !== null && !Number.isNaN(Number(row.unrealized_pnl))) {
+    return Number(row.unrealized_pnl)
+  }
+  const last = Number(row?.last_price)
+  if (!Number.isFinite(last) || last <= 0) return 0
+  const mult = isFut(row) ? Number(row?.multiplier || 1) : 1
+  const longPnl = (last - Number(row?.avg_cost || 0)) * longQty(row) * mult
+  const shortPnl = (Number(row?.short_avg || 0) - last) * shortQty(row) * mult
+  return longPnl + shortPnl
+}
+
+function futuresSide() {
+  const opening = order.value.offset === 'open'
+  const longSide = order.value.direction === 'long'
+  if (opening && longSide) return 'buy'
+  if (opening && !longSide) return 'short'
+  if (!opening && longSide) return 'sell'
+  return 'cover'
+}
+
+function orderSideLabel(row: any) {
+  if (row?.market === 'FUT' || row?.side === 'short' || row?.side === 'cover') {
+    if (row.side === 'buy') return '开多'
+    if (row.side === 'short') return '开空'
+    if (row.side === 'sell') return '平多'
+    if (row.side === 'cover') return '平空'
+  }
+  return row?.side === 'buy' ? '买入' : '卖出'
+}
+
+function orderTagType(row: any) {
+  if (row?.side === 'short') return 'warning'
+  if (row?.side === 'cover') return 'info'
+  return row?.side === 'buy' ? 'success' : 'danger'
+}
+
 // 获取货币符号
 function getCurrencySymbol(_currency: string | undefined) {
   return '¥'
@@ -383,12 +525,22 @@ async function fetchPriceInfo() {
 // 检测市场类型
 function detectMarket() {
   const code = order.value.code.trim().toUpperCase()
+  const prev = detectedMarket.value
   if (!code) {
     detectedMarket.value = ''
     currentPrice.value = null
     priceRange.value = null
     return
   }
+
+  if (/^[A-Z]{1,2}\d{0,4}$/.test(code) && !/^\d/.test(code)) {
+    detectedMarket.value = 'FUT'
+    if (prev !== 'FUT' && order.value.qty === 100) order.value.qty = 1
+    fetchPriceInfo()
+    return
+  }
+
+  if (prev === 'FUT' && order.value.qty === 1) order.value.qty = 100
 
   // A股：6位数字
   if (/^\d{6}$/.test(code)) {
@@ -400,6 +552,29 @@ function detectMarket() {
   // 默认A股
   detectedMarket.value = 'CN'
   fetchPriceInfo()
+}
+
+async function fetchTq() {
+  try {
+    loading.value.tq = true
+    const [accountRes, positionsRes, statusRes] = await Promise.all([
+      paperApi.getTqAccount(),
+      paperApi.getTqPositions(),
+      paperApi.getTqOrderStatus()
+    ])
+    const statusData = (statusRes as any)?.data?.data ?? (statusRes as any)?.data ?? null
+    tqOrderStatus.value = statusData
+    const accountData = (accountRes as any)?.data?.data ?? (accountRes as any)?.data ?? null
+    tqAccount.value = accountData
+    const posData = (positionsRes as any)?.data?.data ?? (positionsRes as any)?.data ?? {}
+    if (posData && posData.success === false && tqAccount.value && tqAccount.value.success !== false) {
+      tqAccount.value = { ...tqAccount.value, success: false, error: posData.error }
+    }
+  } catch (e: any) {
+    tqAccount.value = { success: false, error: e?.message || '天勤账户读取失败' }
+  } finally {
+    loading.value.tq = false
+  }
 }
 
 async function fetchAccount() {
@@ -493,7 +668,7 @@ function openOrderDialog() {
 async function submitOrder() {
   try {
     const payload: any = { 
-      side: order.value.side as 'buy' | 'sell', 
+      side: detectedMarket.value === 'FUT' ? futuresSide() : order.value.side, 
       code: order.value.code, 
       quantity: Number(order.value.qty),
       market: detectedMarket.value || undefined
@@ -512,9 +687,10 @@ async function submitOrder() {
     const res = await paperApi.placeOrder(payload)
     if (res.success) {
       ElMessage.success('下单成功')
+      if (detectedMarket.value === 'FUT') activeMarketTab.value = 'FUT'
       orderDialog.value = false
       // 重置订单表单
-      order.value = { side: 'buy', code: '', qty: 100, price: undefined }
+      order.value = { side: 'buy', offset: 'open', direction: 'long', code: '', qty: 100, price: undefined }
       useCustomPrice.value = false
       currentPrice.value = null
       priceRange.value = null
@@ -624,7 +800,35 @@ async function confirmReset() {
 }
 
 async function refreshAll() {
-  await Promise.all([fetchAccount(), fetchPositions(), fetchOrders()])
+  await Promise.all([fetchAccount(), fetchPositions(), fetchOrders(), fetchTq()])
+}
+
+async function closeFutures(position: any, side: 'long' | 'short') {
+  if (!position?.code) return
+  const qty = side === 'long' ? longQty(position) : shortQty(position)
+  const avg = side === 'long' ? position.avg_cost : position.short_avg
+  if (!qty) return
+  try {
+    await ElMessageBox.confirm(
+      `确认平${side === 'long' ? '多' : '空'} ${position.name || position.code}？\n\n当前持仓：${qty} 手\n均价：${fmtPrice(avg)}\n最新价：${fmtPrice(position.last_price)}`,
+      '平仓确认',
+      { confirmButtonText: '确认平仓', cancelButtonText: '取消', type: 'warning' }
+    )
+    const res = await paperApi.placeOrder({
+      side: side === 'long' ? 'sell' : 'cover',
+      code: position.code,
+      quantity: qty,
+      market: 'FUT'
+    })
+    if (res.success) {
+      ElMessage.success('平仓成功')
+      await refreshAll()
+    } else {
+      ElMessage.error(res.message || '平仓失败')
+    }
+  } catch (error: any) {
+    if (error !== 'cancel') ElMessage.error(error?.message || '平仓失败')
+  }
 }
 
 // 查看报告详情（跳转到报告详情页）
@@ -717,7 +921,11 @@ onMounted(() => {
   const qMarket = String(route.query.market || '').trim()
   if (qMarket) {
     const normalizedMarket = normalizeMarketForAnalysis(qMarket)
-    if (normalizedMarket === 'ETF') {
+    if (String(qMarket).toUpperCase() === 'FUT' || normalizedMarket === 'FUT') {
+      detectedMarket.value = 'FUT'
+      activeMarketTab.value = 'FUT'
+      if (!route.query.qty && !route.query.quantity) order.value.qty = 1
+    } else if (normalizedMarket === 'ETF') {
       detectedMarket.value = 'ETF'
     } else {
       detectedMarket.value = 'CN'

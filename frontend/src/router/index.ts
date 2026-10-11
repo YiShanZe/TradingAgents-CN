@@ -108,14 +108,22 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'single',
         name: 'SingleAnalysis',
-        component: () => import('@/views/Analysis/SingleAnalysis.vue')
+        component: () => import('@/views/Analysis/SingleAnalysis.vue'),
+        meta: {
+          title: '单股研究',
+          requiresAuth: true
+        }
       },
       // 批量分析（Pro）→ pro.routes.ts
       ...proAnalysisChildren,
       {
         path: 'general',
         name: 'GeneralAnalysis',
-        component: () => import('@/views/Analysis/GeneralAnalysis.vue')
+        component: () => import('@/views/Analysis/GeneralAnalysis.vue'),
+        meta: {
+          title: '通用研究',
+          requiresAuth: true
+        }
       },
 
     ]
@@ -554,6 +562,12 @@ const routes: RouteRecordRaw[] = [
         name: 'JdyunConfig',
         component: () => import('@/views/Settings/JdyunConfig.vue'),
         meta: { title: '系统配置', requiresAuth: true }
+      },
+      {
+        path: 'license',
+        name: 'LicenseSettings',
+        component: () => import('@/views/Settings/License.vue'),
+        meta: { title: '授权管理', requiresAuth: true }
       }
     ]
   },
@@ -695,9 +709,9 @@ router.beforeEach(async (to, _from, next) => {
 
   // 设置页面标题
   const title = to.meta.title as string
-  if (title) {
-    document.title = `${title} - TradingAgents-CN`
-  }
+  document.title = title
+    ? `${title} - TradingAgents-CN`
+    : 'TradingAgents-CN - 多智能体股票分析学习平台'
 
   console.log('🚦 路由守卫检查:', {
     path: to.fullPath,
@@ -720,9 +734,9 @@ router.beforeEach(async (to, _from, next) => {
       }
       
       if (!licenseStore.isPro) {
-        ElMessage.warning('此功能需要高级学员权限，请先认证')
+        ElMessage.warning('此功能在社区版中不可用')
         NProgress.done()
-        next('/settings/license')
+        next('/dashboard')
         return
       }
     } catch (error) {
@@ -794,10 +808,12 @@ router.beforeEach(async (to, _from, next) => {
       await licenseStore.verifyLicense()
     }
 
-    // 如果不是高级学员，显示提示并重定向到授权管理页面
+    // 社区版没有可购买的授权页。分析流等高级路由停在仪表板，避免再进入失效地址。
     if (!licenseStore.isPro) {
-      ElMessage.warning('此功能为高级学员专属，请先升级学员等级')
-      next('/settings/license')
+      ElMessage.warning(to.path.startsWith('/workflow')
+        ? '分析流在社区版中不可用'
+        : '此功能在社区版中不可用')
+      next('/dashboard')
       return
     }
   }

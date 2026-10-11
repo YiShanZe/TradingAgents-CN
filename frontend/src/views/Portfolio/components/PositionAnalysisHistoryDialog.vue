@@ -311,11 +311,11 @@ const getStatusText = (status: string) => {
 
 <style scoped>
 .text-success {
-  color: #67c23a;
+  color: #f56c6c;
 }
 
 .text-danger {
-  color: #f56c6c;
+  color: #67c23a;
 }
 
 .conclusion-preview {

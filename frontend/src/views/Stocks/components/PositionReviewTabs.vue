@@ -158,7 +158,7 @@
               <div class="pos-item"><span class="pos-label">市值</span><b class="pos-value">¥{{ fmtPrice(positionData.real.market_value) }}</b></div>
               <div class="pos-item">
                 <span class="pos-label">浮动盈亏</span>
-                <b class="pos-value" :class="positionData.real.unrealized_pnl >= 0 ? 'positive' : 'negative'">
+                <b class="pos-value" :class="pnlClass(positionData.real.unrealized_pnl)">
                   {{ formatPnl(positionData.real.unrealized_pnl, positionData.real.unrealized_pnl_pct) }}
                 </b>
               </div>
@@ -180,7 +180,7 @@
               <div class="pos-item"><span class="pos-label">市值</span><b class="pos-value">¥{{ fmtPrice(positionData.paper.market_value) }}</b></div>
               <div class="pos-item">
                 <span class="pos-label">浮动盈亏</span>
-                <b class="pos-value" :class="positionData.paper.unrealized_pnl >= 0 ? 'positive' : 'negative'">
+                <b class="pos-value" :class="pnlClass(positionData.paper.unrealized_pnl)">
                   {{ formatPnl(positionData.paper.unrealized_pnl, positionData.paper.unrealized_pnl_pct) }}
                 </b>
               </div>
@@ -360,14 +360,16 @@ const positionBadgeText = computed(() => {
   const pct = snap?.unrealized_pnl_pct
   if (!snap || pct === undefined || !Number.isFinite(pct)) return '已分析'
   if (pct > 0) return `浮盈 ${pct.toFixed(2)}%`
-  return `浮亏 ${Math.abs(pct).toFixed(2)}%`
+  if (pct < 0) return `浮亏 ${Math.abs(pct).toFixed(2)}%`
+  return '持平'
 })
 
 const positionBadgeClass = computed(() => {
   const snap = props.positionSummary.snapshot
   if (!snap) return ''
   const pnl = snap.unrealized_pnl ?? 0
-  return pnl >= 0 ? 'badge-up' : 'badge-down'
+  if (!pnl) return ''
+  return pnl > 0 ? 'badge-up' : 'badge-down'
 })
 
 const reviewBadgeText = computed(() => {

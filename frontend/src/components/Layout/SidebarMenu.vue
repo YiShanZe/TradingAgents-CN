@@ -97,7 +97,7 @@
 
     <el-menu-item index="/portfolio">
       <el-icon><PieChart /></el-icon>
-      <template #title>持仓研究</template>
+      <template #title>持仓分析</template>
     </el-menu-item>
 
     <el-menu-item index="/review">
@@ -135,8 +135,8 @@
           {{ item.label }}
           <el-tag v-if="item.advanced" type="success" size="small" style="margin-left: 4px; transform: scale(0.85);">高级</el-tag>
         </el-menu-item>
-        <el-menu-item v-if="!isJdyunMode() && proLicenseMenuItem" :index="proLicenseMenuItem.path">
-          {{ proLicenseMenuItem.label }}
+        <el-menu-item v-if="!isJdyunMode()" :index="proLicenseMenuItem?.path || '/settings/license'">
+          {{ proLicenseMenuItem?.label || '授权管理' }}
           <el-icon style="margin-left: 4px;"><Key /></el-icon>
         </el-menu-item>
       </el-sub-menu>

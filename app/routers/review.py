@@ -430,6 +430,7 @@ async def get_reviewable_trades(
     code: Optional[str] = Query(None, description="股票代码筛选"),
     start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    source: str = Query("paper", description="数据源: paper(模拟交易)。本接口读取模拟成交"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     current_user: dict = Depends(get_current_user)
@@ -444,6 +445,12 @@ async def get_reviewable_trades(
         from app.core.database import get_mongo_db
         from datetime import datetime
         db = get_mongo_db()
+
+        from app.services.paper_futures import count_trade_sides
+
+        # 模拟复盘固定读取 paper_trades。source=paper 为显式约定，避免误查实盘变动。
+        if source not in {"paper", "real"}:
+            source = "paper"
 
         # 构建查询条件
         query = {"user_id": current_user["id"]}
@@ -494,16 +501,21 @@ async def get_reviewable_trades(
                     "market": t.get("market", "CN"),
                     "buy_count": 0,
                     "sell_count": 0,
+                    "short_count": 0,
+                    "cover_count": 0,
+                    "open_count": 0,
+                    "close_count": 0,
                     "total_pnl": 0,
                     "total_buy_amount": 0,
                     "total_sell_amount": 0,
                     "last_trade_time": None
                 }
-            if t.get("side") == "buy":
-                code_stats[c]["buy_count"] += 1
+            side_counts = count_trade_sides(t.get("side"))
+            for key, inc in side_counts.items():
+                code_stats[c][key] += inc
+            if side_counts["open_count"]:
                 code_stats[c]["total_buy_amount"] += t.get("amount", 0)
-            else:
-                code_stats[c]["sell_count"] += 1
+            elif side_counts["close_count"]:
                 code_stats[c]["total_sell_amount"] += t.get("amount", 0)
                 code_stats[c]["total_pnl"] += t.get("pnl", 0)
 
@@ -534,19 +546,22 @@ async def get_reviewable_trades(
                 if pos and pos.get("name"):
                     code_stats[c]["name"] = pos.get("name", "")
 
-        # 找出已完成交易（有买有卖）的股票
+        # 已完成：有开仓且有平仓（期货开空/平空同样计入）
         completed_stocks = [
             {"code": c, **stats}
             for c, stats in code_stats.items()
-            if stats["buy_count"] > 0 and stats["sell_count"] > 0
+            if stats["open_count"] > 0 and stats["close_count"] > 0
         ]
 
-        # 所有有交易的股票（包括只买入还没卖出的）
-        # status判断：只有当卖出数量 >= 买入数量时，才算已完全平仓
+        # 所有有开仓的标的（含只开空、尚未平仓的期货）
         all_stocks = [
-            {"code": c, "status": "completed" if stats["sell_count"] >= stats["buy_count"] and stats["sell_count"] > 0 else "holding", **stats}
+            {
+                "code": c,
+                "status": "completed" if stats["close_count"] >= stats["open_count"] and stats["close_count"] > 0 else "holding",
+                **stats,
+            }
             for c, stats in code_stats.items()
-            if stats["buy_count"] > 0
+            if stats["open_count"] > 0
         ]
 
         return ok({
@@ -665,9 +680,12 @@ async def get_trades_by_code(
                     "created_at": c.get("created_at").isoformat() if c.get("created_at") else None
                 })
 
-        # 计算汇总
+        # 计算汇总。期货开空/平空计入开仓/平仓，避免空头复盘数量为 0。
+        from app.services.paper_futures import CLOSE_SIDES, OPEN_SIDES
         total_buy_qty = sum(t["quantity"] for t in items if t["side"] == "buy")
         total_sell_qty = sum(t["quantity"] for t in items if t["side"] == "sell")
+        total_open_qty = sum(t["quantity"] for t in items if t["side"] in OPEN_SIDES)
+        total_close_qty = sum(t["quantity"] for t in items if t["side"] in CLOSE_SIDES)
         total_pnl = sum(t["pnl"] or 0 for t in items)  # 处理 None 值
 
         return ok({
@@ -677,8 +695,10 @@ async def get_trades_by_code(
                 "total_trades": len(items),
                 "total_buy_quantity": total_buy_qty,
                 "total_sell_quantity": total_sell_qty,
+                "total_open_quantity": total_open_qty,
+                "total_close_quantity": total_close_qty,
                 "total_pnl": round(total_pnl, 2),
-                "is_closed": total_sell_qty >= total_buy_qty and total_buy_qty > 0
+                "is_closed": total_close_qty >= total_open_qty and total_open_qty > 0
             }
         })
 

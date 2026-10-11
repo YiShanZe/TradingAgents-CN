@@ -486,6 +486,9 @@ class PositionResponse(BaseModel):
     currency: str
     quantity: int
     cost_price: float
+    short_qty: int = 0
+    short_avg: Optional[float] = None
+    position_side: Optional[str] = None
     original_avg_cost: Optional[float] = None  # 原始买入均价（减仓不变，用于投资评估）
     original_cost_price: Optional[float] = None  # 原始成本价（不复权的实际成交价）
     price_adjust_type: Optional[str] = None     # 价格复权标注：None=前复权，"none"=原始未复权

@@ -24,7 +24,7 @@
           <el-table-column prop="side" label="方向" width="60">
             <template #default="{ row }">
               <el-tag :type="row.side === 'buy' ? 'success' : 'danger'" size="small">
-                {{ row.side === 'buy' ? '买入' : '卖出' }}
+                {{ sideLabel(row.side, row.market) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -46,9 +46,15 @@
         </el-table>
         
         <div class="summary" v-if="tradeSummary">
-          <span>买入: {{ tradeSummary.total_buy_quantity }}股</span>
-          <span>卖出: {{ tradeSummary.total_sell_quantity }}股</span>
-          <span :class="tradeSummary.total_pnl >= 0 ? 'positive' : 'negative'">
+          <template v-if="futuresTrades">
+            <span>开仓: {{ tradeSummary.total_open_quantity ?? 0 }}手</span>
+            <span>平仓: {{ tradeSummary.total_close_quantity ?? 0 }}手</span>
+          </template>
+          <template v-else>
+            <span>买入: {{ tradeSummary.total_buy_quantity }}股</span>
+            <span>卖出: {{ tradeSummary.total_sell_quantity }}股</span>
+          </template>
+          <span :class="pnlTone(tradeSummary.total_pnl)">
             盈亏: {{ tradeSummary.total_pnl?.toFixed(2) }}
           </span>
         </div>
@@ -160,6 +166,24 @@ onMounted(() => {
   })
 })
 
+const sideLabel = (side?: string, market?: string) => {
+  if (market === 'FUT' || side === 'short' || side === 'cover') {
+    if (side === 'buy') return '开多'
+    if (side === 'short') return '开空'
+    if (side === 'sell') return '平多'
+    if (side === 'cover') return '平空'
+  }
+  return side === 'buy' ? '买入' : '卖出'
+}
+
+const futuresTrades = computed(() => trades.value.some(t => t.market === 'FUT' || t.side === 'short' || t.side === 'cover'))
+
+const pnlTone = (val?: number | null) => {
+  const n = Number(val)
+  if (!Number.isFinite(n) || n === 0) return 'flat'
+  return n > 0 ? 'positive' : 'negative'
+}
+
 const loadTrades = async () => {
   console.log('[NewReviewDialog] loadTrades 开始', { code: form.value.code })
   
@@ -173,7 +197,8 @@ const loadTrades = async () => {
   
   try {
     console.log('[NewReviewDialog] 调用 API 获取交易记录', { code: form.value.code })
-    const res = await reviewApi.getTradesByCode(form.value.code)
+    const source = props.source === 'real' ? 'real' : 'paper'
+    const res = await reviewApi.getTradesByCode(form.value.code, source)
     console.log('[NewReviewDialog] API 响应', res)
     
     if (res.success) {
@@ -285,7 +310,8 @@ watch(visible, async (val) => {
   color: #606266;
   span { margin-right: 16px; }
 }
-.positive { color: #f56c6c; }  // 中国习惯：红色表示盈利（正数）
-.negative { color: #67c23a; }  // 中国习惯：绿色表示亏损（负数）
+.positive { color: #f56c6c; }
+.negative { color: #67c23a; }
+.flat { color: #909399; }
 </style>
 

@@ -129,7 +129,7 @@ const getTaskTypeLabel = (type?: string) => {
     stock_analysis: '单股研究',
     etf_analysis: 'ETF 分析',
     batch_analysis: '批量分析',
-    position_analysis: '持仓研究',
+    position_analysis: '持仓分析',
     trade_review: '复盘分析',
     portfolio_health: '持仓健康',
     market_overview: '市场概览',
